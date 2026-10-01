@@ -1,0 +1,67 @@
+# Dependencies and build output are recreated inside the image.
+node_modules
+**/node_modules
+**/dist
+**/dist-exe
+**/dist-electron
+**/.vite-plus
+**/.turbo
+**/.cache
+**/.expo
+**/coverage
+release
+release-mock
+build
+.electron-runtime
+.showcase
+**/.showcase
+**/.generated
+native/**/target
+
+# Vendored read-only references (180 MB) and local state.
+.repos
+.t3
+.git
+.env
+.env.*
+!.env.example
+.alchemy
+.vercel
+.tanstack
+.vitest-*
+*.log
+.logs
+.plans
+.gstack
+.claude
+.cursor
+.agents
+.devcontainer
+.vscode
+.idea
+.github
+.gitea
+.macroscope
+.coderabbit.yaml
+.vite-hooks
+
+# Surfaces the server image never ships. Their package.json files stay:
+# `pnpm install --frozen-lockfile` refuses a workspace whose importers do not
+# match the lockfile.
+apps/desktop/**
+!apps/desktop/package.json
+apps/mobile/**
+!apps/mobile/package.json
+# pnpm needs the `file:` modules, and the web build's license-notice plugin
+# (third-party-licenses.config.json) reads LICENSE files from here and from
+# native/libghostty-vt.
+!apps/mobile/modules/**
+apps/marketing/**
+!apps/marketing/package.json
+infra/**
+!infra/relay/package.json
+packaging
+assets
+docs
+*.md
+!README.md

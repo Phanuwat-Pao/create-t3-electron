@@ -1,0 +1,537 @@
+name: CI
+
+on:
+  push:
+    branches:
+      # main stays disabled on purpose: enabling it makes every push to main
+      # build an image and notify MiniIDP (i.e. can deploy). Uncomment when
+      # this repo should ship from main.
+      # - main
+      - "release/*"
+      - "develop"
+      - "feature/*"
+  pull_request:
+
+# scale-to-zero runners: a cold start per job is the main cost → cancel runs
+# that a newer push on the same ref has superseded, instead of waking runners
+# for a pipeline whose result is already stale.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Job 0: Wait for MiniIDP validation (runs alongside quality; gates build) ───
+  validate:
+    name: "⓪ Validate idp.yaml"
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Wait for MiniIDP check
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          GITEA_URL="${{ github.server_url }}"
+          REPO="${{ github.repository }}"
+          SHA="${{ github.sha }}"
+          MAX_ATTEMPTS=30
+
+          echo "⏳ Waiting for MiniIDP commit status..."
+          echo "   Repo: ${REPO}"
+          echo "   SHA:  ${SHA}"
+          echo ""
+
+          for i in $(seq 1 ${MAX_ATTEMPTS}); do
+            STATUSES=$(curl -s -H "Authorization: token ${GITEA_TOKEN}" \
+              "${GITEA_URL}/api/v1/repos/${REPO}/commits/${SHA}/statuses")
+
+            # Find MiniIDP status (context starts with "MiniIDP")
+            IDP_STATE=$(echo "${STATUSES}" | jq -r '[.[] | select(.context | startswith("MiniIDP"))][0].status // empty')
+            IDP_DESC=$(echo "${STATUSES}" | jq -r '[.[] | select(.context | startswith("MiniIDP"))][0].description // empty')
+
+            if [ "${IDP_STATE}" = "success" ]; then
+              echo "✅ MiniIDP validation passed"
+              exit 0
+            elif [ "${IDP_STATE}" = "failure" ] || [ "${IDP_STATE}" = "error" ]; then
+              echo "::error::MiniIDP validation failed"
+              echo ""
+              echo "❌ MiniIDP errors:"
+              echo "   ${IDP_DESC}"
+              exit 1
+            fi
+
+            echo "   [${i}/${MAX_ATTEMPTS}] MiniIDP not ready yet (state: ${IDP_STATE:-pending})..."
+            sleep 2
+          done
+
+          echo "::warning::MiniIDP check timed out after $((MAX_ATTEMPTS * 2))s — proceeding anyway"
+
+  # ─── Job ⓪b: Affected services ────────────────────────────────────────────────
+  # Decide whether the one deployable image (the `web` service: apps/server
+  # with the web client bundled in) changed since the LAST SUCCESSFUL BUILD
+  # (the ci-built/<branch> marker; falls back to the push range, then
+  # build_all). A change that only touches apps/desktop, apps/mobile,
+  # apps/marketing, infra, native or docs never reaches the image, so it must
+  # not rebuild it.
+  # This repo runs on Vite+ rather than turbo, so the dependency graph is the
+  # path list below: the server bundles every workspace package under
+  # packages/ and reads scripts/lib at build time.
+  # FAIL-SAFE: any uncertainty (new branch, tooling/CI/root change, git
+  # error) → build_all=true → the old "rebuild everything" behaviour. We never
+  # silently skip an image that was needed.
+  affected:
+    name: "⓪ Affected services"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Deploy branches only (matches build-push): feature/PR pushes skip this
+    # job, and build-push (which needs it) skips with it.
+    if: >-
+      github.event_name == 'push' && (
+        github.ref == 'refs/heads/main' ||
+        github.ref == 'refs/heads/develop' ||
+        startsWith(github.ref, 'refs/heads/release/')
+      )
+    outputs:
+      build_all: ${{ steps.detect.outputs.build_all }}
+      services: ${{ steps.detect.outputs.services }}
+    steps:
+      - name: Checkout
+        uses: https://oauth2:${{ secrets.TELECORP_PUBLIC_TOKEN }}@gitea.telecorpthailand.com/telecorp/actions-checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect affected deployable services
+        id: detect
+        env:
+          BEFORE: ${{ github.event.before }}
+          BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set +e -u  # fail-safe: never abort — fall back to build_all on any error
+          ZERO="0000000000000000000000000000000000000000"
+
+          emit_all() {
+            {
+              echo "build_all=true"
+              echo "services="
+            } >> "$GITHUB_OUTPUT"
+            echo "🟡 Building ALL services — $1" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+
+          # Deployable services: image name -> what the image is built from.
+          # Only the server ships as a container; apps/desktop (Electron),
+          # apps/mobile (store builds), apps/marketing (static site) and
+          # infra/relay (Cloudflare worker) are deliberately excluded.
+          SERVICE="web"
+          IMAGE_INPUTS='^(apps/server/|apps/web/|packages/|scripts/|patches/|docker/)'
+
+          # Base = the LAST SUCCESSFULLY BUILT commit (ci-built/<branch>,
+          # advanced by mark-built after every green Build), NOT the push's own
+          # before..HEAD: concurrency cancels superseded runs, so a push-range
+          # diff silently loses every change the cancelled runs covered.
+          # Fallbacks: marker missing → push range; neither usable → build_all.
+          git fetch --quiet origin "refs/heads/ci-built/${BRANCH}" 2>/dev/null
+          MARKER=$(git rev-parse --verify -q FETCH_HEAD)
+          if [ -n "${MARKER}" ]; then
+            BASE="${MARKER}"
+            echo "base = ci-built/${BRANCH} (${BASE})"
+          else
+            BASE="${BEFORE}"
+            echo "base = push range (no ci-built/${BRANCH} marker yet)"
+          fi
+
+          if [ -z "${BASE}" ] || [ "${BASE}" = "${ZERO}" ] || ! git rev-parse "${BASE}" >/dev/null 2>&1; then
+            emit_all "no usable base SHA (new branch / force push)"
+          fi
+
+          CHANGED=$(git diff --name-only "${BASE}" "${HEAD_SHA}")
+          [ $? -ne 0 ] && emit_all "git diff failed"
+          echo "::group::Changed files"; echo "${CHANGED}"; echo "::endgroup::"
+
+          # Global inputs the path list doesn't track → build all. Root files
+          # cover package.json, pnpm-workspace.yaml (catalog + patches),
+          # pnpm-lock.yaml, vite.config.ts and .dockerignore.
+          # This doubles as the manual full-rebuild lever: push a commit
+          # touching any root file, oxlint-plugin-t3code/ or .gitea/ to force a
+          # fresh image.
+          echo "${CHANGED}" | grep -qE '^(oxlint-plugin-t3code/|\.gitea/|[^/]+$)' \
+            && emit_all "tooling / CI / root file changed"
+
+          BUILD_WEB=""
+          echo "${CHANGED}" | grep -qE "${IMAGE_INPUTS}" && BUILD_WEB="yes"
+
+          if [ -z "${BUILD_WEB}" ]; then
+            { echo "build_all=false"; echo "services="; } >> "$GITHUB_OUTPUT"
+            echo "⚪ No deployable services affected — nothing to build" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          { echo "build_all=false"; echo "services=|${SERVICE}|"; } >> "$GITHUB_OUTPUT"
+          echo "🟢 Affected services: |${SERVICE}|" >> "$GITHUB_STEP_SUMMARY"
+
+  # ─── Job 1: Quality (starts immediately, parallel with validate + build) ───
+  # NON-GATING: the repo's own pre-commit hook (.vite-hooks, `vp staged`)
+  # already enforces formatting and lint on the dev machine, so CI quality is
+  # a backstop rather than a gate — build-push does not wait on it.
+  quality:
+    name: "① Quality Gates"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # Non-interactive corepack so it can fetch the packageManager pnpm
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      # The Electron binary (~100 MB) is only needed to run the desktop app;
+      # lint and typecheck read the package's types.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      CI: "true"
+    steps:
+      - name: Checkout
+        uses: https://oauth2:${{ secrets.TELECORP_PUBLIC_TOKEN }}@gitea.telecorpthailand.com/telecorp/actions-checkout@v4
+
+      - name: Setup Node.js
+        uses: https://oauth2:${{ secrets.TELECORP_PUBLIC_TOKEN }}@gitea.telecorpthailand.com/telecorp/actions-setup-node@v4
+        with:
+          # engines.node in package.json; this repo has no .nvmrc.
+          node-version-file: "package.json"
+
+      # node-pty has no Linux prebuild, so its install step compiles it.
+      - name: Install native build tools
+        run: |
+          if command -v g++ >/dev/null && command -v python3 >/dev/null && command -v make >/dev/null; then
+            echo "build tools already present"; exit 0
+          fi
+          SUDO=""; command -v sudo >/dev/null && SUDO=sudo
+          ${SUDO} apt-get update -qq
+          ${SUDO} apt-get install -y -qq python3 make g++
+
+      - name: Install pnpm
+        # Version comes from the "packageManager" field in package.json
+        run: corepack enable
+
+      - name: Configure pnpm store
+        run: pnpm config set store-dir "${RUNNER_TEMP}/pnpm-store"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm store
+        uses: https://oauth2:${{ secrets.TELECORP_PUBLIC_TOKEN }}@gitea.telecorpthailand.com/telecorp/actions-cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      # Vite+ (`vp`) is a devDependency, so `pnpm install` is what `vp i` does
+      # and `pnpm exec vp` is on PATH afterwards.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Lint + format check, same as the GitHub CI `Check` step.
+      - name: Check
+        run: pnpm exec vp check
+
+      - name: Type check
+        run: pnpm run typecheck
+
+      - name: Security audit (high+)
+        run: pnpm audit --audit-level=high
+        continue-on-error: true
+
+  # ─── Job 2: Build & Push Docker images (push only) ───
+  # Waits only on validate (idp.yaml must pass before anything deployable is
+  # produced) and affected — not on quality, which runs in parallel as a
+  # non-gating backstop.
+  # ⚠️ STATIC matrix only — do not switch to a dynamic matrix built from job
+  # outputs (`strategy.matrix: ${{ fromJSON(needs.*.outputs.*) }}`): Gitea
+  # act_runner does not support it (gitea#25179, still open) → the matrix does
+  # not expand, service/path come out empty, and the build breaks.
+  build-push:
+    name: "② Build · ${{ matrix.service }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [validate, affected]
+    # Build images only on DEPLOY branches, and only for services the
+    # `affected` job flagged (build_all=true on any uncertainty → everything).
+    # feature/* and PRs still run Quality — they just don't fan out jobs to
+    # push images nobody deploys.
+    if: >-
+      github.event_name == 'push' && (
+        github.ref == 'refs/heads/main' ||
+        github.ref == 'refs/heads/develop' ||
+        startsWith(github.ref, 'refs/heads/release/')
+      ) && (
+        needs.affected.outputs.build_all == 'true' ||
+        contains(needs.affected.outputs.services, format('|{0}|', matrix.service))
+      )
+    strategy:
+      fail-fast: false
+      matrix:
+        # service = image / deploy name (must match idp.yaml)
+        # dockerfile = the Dockerfile that builds it (context is the repo root)
+        include:
+          - service: web
+            dockerfile: docker/Dockerfile.server
+    env:
+      REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      IDP_URL: ${{ secrets.IDP_URL }}
+      IDP_TOKEN: ${{ secrets.IDP_TOKEN }}
+      # Read access to the telecorp/actions-* mirrors that `uses:` resolves.
+      TELECORP_PUBLIC_TOKEN: ${{ secrets.TELECORP_PUBLIC_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: https://oauth2:${{ secrets.TELECORP_PUBLIC_TOKEN }}@gitea.telecorpthailand.com/telecorp/actions-checkout@v4
+
+      - name: Validate secrets
+        run: |
+          echo "::group::Checking required secrets"
+          MISSING=""
+
+          for SECRET_NAME in TELECORP_PUBLIC_TOKEN REGISTRY_URL REGISTRY_USERNAME REGISTRY_PASSWORD; do
+            VAL=$(eval echo "\${$SECRET_NAME}")
+            if [ -z "${VAL}" ]; then
+              MISSING="${MISSING} ${SECRET_NAME}"
+              echo "❌ ${SECRET_NAME}: NOT SET"
+            else
+              echo "✅ ${SECRET_NAME}: set (${#VAL} chars)"
+            fi
+          done
+          echo "::endgroup::"
+
+          echo "::group::Checking optional secrets"
+          for SECRET_NAME in IDP_URL IDP_TOKEN; do
+            VAL=$(eval echo "\${$SECRET_NAME}")
+            if [ -z "${VAL}" ]; then
+              echo "⚠️ ${SECRET_NAME}: NOT SET (notify step will be skipped)"
+            else
+              echo "✅ ${SECRET_NAME}: set (${#VAL} chars)"
+            fi
+          done
+          echo "::endgroup::"
+
+          if [ -n "${MISSING}" ]; then
+            echo "::error::Missing required secrets:${MISSING}"
+            exit 1
+          fi
+          echo "✅ All required secrets present"
+
+      - name: Login to registry
+        run: |
+          echo "🔐 Logging in to ${REGISTRY_URL} as ${REGISTRY_USERNAME}..."
+          echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY_URL}" \
+            -u "${REGISTRY_USERNAME}" --password-stdin
+          echo "✅ Login successful"
+
+      - name: Set image meta
+        id: meta
+        run: |
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          BRANCH=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          TAG="${BRANCH}-sha-${SHA_SHORT}"
+          IMAGE="${REGISTRY_URL}/${{ github.event.repository.name }}/${{ matrix.service }}"
+
+          echo "tag=${TAG}"     >> $GITHUB_OUTPUT
+          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
+
+          echo "📋 Image Meta:"
+          echo "  Service:  ${{ matrix.service }}"
+          echo "  Branch:   ${BRANCH}"
+          echo "  SHA:      ${SHA_SHORT}"
+          echo "  Tag:      ${TAG}"
+          echo "  Image:    ${IMAGE}"
+          echo "  Full:     ${IMAGE}:${TAG}"
+
+      - name: Setup Docker Buildx
+        run: |
+          # Pull the buildkit image + base images through the Harbor
+          # proxy-cache (registry.telecorpthailand.com/dockerhub → Docker Hub)
+          # to dodge Docker Hub's anonymous pull rate limit (429). The gcr
+          # mirror stays as a fallback for any other docker.io reference.
+          cat > /tmp/buildkitd.toml <<'EOT'
+          [registry."docker.io"]
+            mirrors = ["mirror.gcr.io"]
+          EOT
+          docker buildx create --name cibuilder --use \
+            --driver-opt image=registry.telecorpthailand.com/dockerhub/moby/buildkit:buildx-stable-1 \
+            --config /tmp/buildkitd.toml
+          docker buildx inspect --bootstrap
+          echo "✅ Buildx builder ready (buildkit + bases via Harbor proxy)"
+
+      - name: "🐳 Build & Push"
+        run: |
+          IMAGE="${{ steps.meta.outputs.image }}"
+          TAG="${{ steps.meta.outputs.tag }}"
+
+          echo "🔨 Building ${IMAGE}:${TAG}"
+          echo "   Dockerfile: ${{ matrix.dockerfile }}"
+          echo "   Cache:      ${IMAGE}:buildcache"
+          echo ""
+          # The full install is the slow step (one lockfile for server, web,
+          # desktop and mobile); the registry cache keeps it warm between runs.
+          docker buildx build \
+            --cache-from type=registry,ref=${IMAGE}:buildcache \
+            --cache-to   type=registry,ref=${IMAGE}:buildcache,mode=max \
+            --build-arg IMAGE_TAG="${TAG}" \
+            --build-arg NODE_IMAGE=registry.telecorpthailand.com/dockerhub/library/node:24-bookworm-slim \
+            -t "${IMAGE}:${TAG}" \
+            -t "${IMAGE}:latest" \
+            -f ${{ matrix.dockerfile }} \
+            --push \
+            .
+          echo ""
+          echo "✅ Build & push complete: ${IMAGE}:${TAG}"
+
+          echo "## 🐳 ${{ matrix.service }} image pushed" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${IMAGE}:${TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${IMAGE}:latest\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: "📡 Notify MiniIDP"
+        run: |
+          if [ -z "${IDP_URL}" ] || [ -z "${IDP_TOKEN}" ]; then
+            echo "⚠️ IDP secrets not set → skipping notify"
+            exit 0
+          fi
+
+          IMAGE="${{ steps.meta.outputs.image }}"
+          TAG="${{ steps.meta.outputs.tag }}"
+          PAYLOAD="{\"repo\":\"${{ github.event.repository.name }}\",\"service\":\"${{ matrix.service }}\",\"branch\":\"${{ github.ref_name }}\",\"tag\":\"${TAG}\",\"image\":\"${IMAGE}\"}"
+
+          echo "📡 Notifying MiniIDP for ${{ matrix.service }}"
+
+          # /image-update re-renders manifests synchronously, so a busy MiniIDP
+          # can legitimately take >30s. Give it a generous per-attempt budget
+          # and retry with linear backoff rather than failing a build whose
+          # image is already safely in Harbor.
+          MAX_RETRIES=5
+          for ATTEMPT in $(seq 1 ${MAX_RETRIES}); do
+            HTTP_CODE=$(curl -s -o /tmp/idp_resp.txt -w "%{http_code}" \
+              -X POST "${IDP_URL}/api/v1/image-update" \
+              -H "X-IDP-Token: ${IDP_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "${PAYLOAD}" \
+              --connect-timeout 10 --max-time 90)
+            if [ "${HTTP_CODE}" -ge 200 ] && [ "${HTTP_CODE}" -lt 300 ]; then
+              echo "✅ MiniIDP notified (${{ matrix.service }}) — attempt ${ATTEMPT}"
+              break
+            fi
+            echo "⚠️ Attempt ${ATTEMPT}/${MAX_RETRIES} failed (HTTP ${HTTP_CODE})"
+            [ ${ATTEMPT} -lt ${MAX_RETRIES} ] && sleep $((ATTEMPT * 10))
+          done
+          if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
+            echo "::error::MiniIDP notify (${{ matrix.service }}) failed after ${MAX_RETRIES} attempts"
+            exit 1
+          fi
+
+  # ─── Job 2b: Advance the last-built marker ───
+  # Runs only when every build-push leg succeeded (a failed or cancelled leg
+  # skips this job, so the marker stays behind and the next run's affected diff
+  # re-covers everything unbuilt). Pushing the ref needs the automatic actions
+  # token to have contents:write; if it doesn't, the push warns and `affected`
+  # simply keeps using the push-range fallback.
+  mark-built:
+    name: "②b All images built → advance ci-built/branch marker"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [affected, build-push]
+    if: >-
+      github.event_name == 'push' && (
+        github.ref == 'refs/heads/main' ||
+        github.ref == 'refs/heads/develop' ||
+        startsWith(github.ref, 'refs/heads/release/')
+      )
+    steps:
+      - name: Checkout
+        uses: https://oauth2:${{ secrets.TELECORP_PUBLIC_TOKEN }}@gitea.telecorpthailand.com/telecorp/actions-checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Advance ci-built/${{ github.ref_name }}
+        run: |
+          git push --force \
+            "${{ github.server_url }}/${{ github.repository }}.git" \
+            "HEAD:refs/heads/ci-built/${{ github.ref_name }}" \
+            && echo "ci-built/${{ github.ref_name }} -> ${{ github.sha }}" \
+            || echo "::warning::could not advance ci-built marker (token lacks push?) — affected falls back to the push range"
+
+  # ─── Job 3: Registry retention ───
+  retention:
+    name: "③ Retention"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: build-push
+    # Same deploy-branch gate as build-push (the producer of the new tags).
+    if: >-
+      github.event_name == 'push' && (
+        github.ref == 'refs/heads/main' ||
+        github.ref == 'refs/heads/develop' ||
+        startsWith(github.ref, 'refs/heads/release/')
+      )
+    env:
+      REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+    steps:
+      - name: "🗑️ Harbor Retention (keep last 3)"
+        continue-on-error: true
+        run: |
+          PROJECT="${{ github.event.repository.name }}"
+          API="https://${REGISTRY_URL}/api/v2.0"
+
+          # Discover every repo in the Harbor project rather than hardcoding a
+          # list, so a service added to the matrix is cleaned automatically.
+          # Strip the "<project>/" prefix to the short name the artifacts API
+          # expects.
+          REPOS=$(curl -s -u "${REGISTRY_USERNAME}:${REGISTRY_PASSWORD}" \
+            "${API}/projects/${PROJECT}/repositories?page_size=100" \
+            | jq -r '.[].name // empty' | sed "s#^${PROJECT}/##")
+
+          if [ -z "${REPOS}" ]; then
+            echo "⚠️ No repositories found (or Harbor unreachable) → nothing to clean"
+            exit 0
+          fi
+
+          for REPO in ${REPOS}; do
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🗑️ Retention: ${REPO}"
+            echo ""
+
+            RESPONSE=$(curl -s -u "${REGISTRY_USERNAME}:${REGISTRY_PASSWORD}" \
+              "${API}/projects/${PROJECT}/repositories/${REPO}/artifacts?sort=-push_time&page_size=100")
+
+            if ! echo "${RESPONSE}" | jq empty 2>/dev/null; then
+              echo "⚠️ Cannot parse Harbor response → skipping ${REPO}"
+              continue
+            fi
+
+            # buildcache is the layer cache build-push reads back; never
+            # count it among the image tags.
+            TAGS=$(echo "${RESPONSE}" | jq -r '.[].tags[]?.name // empty' | grep -v -e '^latest$' -e '^buildcache$')
+
+            if [ -z "${TAGS}" ]; then
+              echo "ℹ️ No tags to clean for ${REPO}"
+              continue
+            fi
+
+            COUNT=0
+            DELETED=0
+            for TAG in ${TAGS}; do
+              COUNT=$((COUNT + 1))
+              if [ ${COUNT} -le 3 ]; then
+                echo "   ✅ KEEP  [${COUNT}] ${TAG}"
+              else
+                echo "   🗑️ DEL   [${COUNT}] ${TAG}"
+                DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                  -X DELETE -u "${REGISTRY_USERNAME}:${REGISTRY_PASSWORD}" \
+                  "${API}/projects/${PROJECT}/repositories/${REPO}/artifacts/${TAG}")
+                if [ "${DEL_CODE}" -ge 200 ] && [ "${DEL_CODE}" -lt 300 ]; then
+                  DELETED=$((DELETED + 1))
+                else
+                  echo "   ⚠️ Failed (HTTP ${DEL_CODE})"
+                fi
+              fi
+            done
+            echo "✅ ${REPO}: kept 3, deleted ${DELETED}"
+            echo ""
+          done

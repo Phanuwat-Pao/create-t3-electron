@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1.7
+# Production image for the T3 Code server (`t3 serve`). The server bundles the
+# web client and serves it from the same origin, so this one image is the whole
+# deployable. MiniIDP deploys it as the `web` service in idp.yaml.
+#
+# Full image reference so CI can point the build at a registry proxy-cache
+# (avoids Docker Hub's anonymous pull rate limit); defaults to Docker Hub for
+# local builds. Debian rather than Alpine: node-pty, @napi-rs/keyring and
+# @ff-labs/fff-node ship glibc builds; musl is not covered by every one of them.
+ARG NODE_IMAGE=node:24-bookworm-slim
+ARG IMAGE_TAG=dev
+
+# ── Base: pnpm from package.json#packageManager ─────────────────────────
+FROM ${NODE_IMAGE} AS base
+ENV PNPM_HOME=/pnpm
+ENV PATH="${PNPM_HOME}:${PATH}"
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN npm install -g corepack@latest && corepack enable
+
+# ── Builder: full install, web build, server bundle ─────────────────────
+FROM base AS builder
+# node-pty has no Linux prebuild, so node-gyp needs python3/make/g++. git is
+# for the install hooks that read the repo.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ git ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+# The Electron binary is ~100 MB and nothing in this image runs it.
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
+ENV CI=true
+COPY . .
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+  pnpm config set store-dir /pnpm/store \
+  && pnpm install --frozen-lockfile
+# Same pieces the release archive stages: the web client as the production
+# build leaves it, and the server bundled by `vp pack` (apps/server/vite.config.ts)
+# with the web client beside it under dist/client, where resolveStaticDir looks.
+# apps/server/scripts/cli.ts build is not used here: it overwrites the icons
+# with the development set.
+RUN pnpm --filter @t3tools/web build
+RUN pnpm --filter t3 build:bundle \
+  && cp -r apps/web/dist apps/server/dist/client
+# Prod-only closure of `t3`: dist/ plus the native packages the bundle leaves
+# external (scripts/lib/cli-external-packages.ts). --legacy because the
+# workspace does not use injected packages.
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+  pnpm --filter t3 --prod deploy --legacy /out/t3
+
+# ── Runner ──────────────────────────────────────────────────────────────
+FROM ${NODE_IMAGE} AS runner
+ARG IMAGE_TAG
+LABEL org.opencontainers.image.title="t3" \
+      org.opencontainers.image.version="${IMAGE_TAG}"
+# git: checkpoints and the source-control panel. openssh-client: SSH remotes.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ca-certificates openssh-client \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+# Don't run production as root. A real home dir matters: provider CLIs keep
+# their own config under ~/.
+RUN groupadd --system --gid 1001 t3 \
+  && useradd --system --uid 1001 --gid t3 --create-home --shell /bin/bash t3
+COPY --from=builder --chown=t3:t3 /out/t3 /app
+# Runtime state (SQLite, pairings, settings). Mount a volume here to keep it
+# across restarts; without one the server starts empty each time.
+RUN mkdir -p /data && chown t3:t3 /data
+USER t3
+
+ENV NODE_ENV=production
+ENV T3CODE_HOME=/data
+ENV T3CODE_HOST=0.0.0.0
+ENV T3CODE_PORT=3773
+EXPOSE 3773
+# `serve` is headless: no browser, and it prints the pairing URL on stdout.
+CMD ["node", "dist/bin.mjs", "serve"]

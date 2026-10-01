@@ -1,0 +1,119 @@
+name: Build & Push (Manual)
+
+on:
+  workflow_dispatch:
+
+# ──────────────────────────────────────────────
+# Manual trigger: กดรันจากหน้า Gitea Actions
+# ใช้สำหรับ build & push โดยไม่ต้องรัน Quality Gates
+# ──────────────────────────────────────────────
+
+jobs:
+  registry-login:
+    name: "① Registry Login"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate secrets
+        env:
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          # Read access to the telecorp/actions-* mirrors that `uses:` resolves.
+          TELECORP_PUBLIC_TOKEN: ${{ secrets.TELECORP_PUBLIC_TOKEN }}
+        run: |
+          MISSING=""
+          [ -z "${TELECORP_PUBLIC_TOKEN}" ] && MISSING="${MISSING} TELECORP_PUBLIC_TOKEN"
+          [ -z "${REGISTRY_URL}" ]      && MISSING="${MISSING} REGISTRY_URL"
+          [ -z "${REGISTRY_USERNAME}" ]  && MISSING="${MISSING} REGISTRY_USERNAME"
+          [ -z "${REGISTRY_PASSWORD}" ]  && MISSING="${MISSING} REGISTRY_PASSWORD"
+
+          if [ -n "${MISSING}" ]; then
+            echo "::error::Missing secrets:${MISSING}"
+            exit 1
+          fi
+
+      - name: Docker login
+        env:
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY_URL}" \
+            -u "${REGISTRY_USERNAME}" --password-stdin
+
+  build-push:
+    name: "② Build · ${{ matrix.service }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: registry-login
+    strategy:
+      fail-fast: false
+      matrix:
+        # service = image / deploy name (must match idp.yaml)
+        # dockerfile = the Dockerfile that builds it (context is the repo root)
+        include:
+          - service: web
+            dockerfile: docker/Dockerfile.server
+    steps:
+      - name: Checkout
+        uses: https://oauth2:${{ secrets.TELECORP_PUBLIC_TOKEN }}@gitea.telecorpthailand.com/telecorp/actions-checkout@v4
+
+      - name: Set image meta
+        id: meta
+        run: |
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          BRANCH=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          TAG="${BRANCH}-sha-${SHA_SHORT}"
+          IMAGE="${{ secrets.REGISTRY_URL }}/${{ github.event.repository.name }}/${{ matrix.service }}"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
+
+      - name: Login to registry
+        env:
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY_URL}" \
+            -u "${REGISTRY_USERNAME}" --password-stdin
+
+      - name: Setup Docker Buildx
+        run: |
+          # Pull buildkit + base images through the Harbor proxy-cache to dodge
+          # Docker Hub's anonymous pull rate limit (429); gcr mirror as fallback.
+          cat > /tmp/buildkitd.toml <<'EOT'
+          [registry."docker.io"]
+            mirrors = ["mirror.gcr.io"]
+          EOT
+          docker buildx create --name cibuilder --use \
+            --driver-opt image=registry.telecorpthailand.com/dockerhub/moby/buildkit:buildx-stable-1 \
+            --config /tmp/buildkitd.toml
+          docker buildx inspect --bootstrap
+
+      - name: Build & push image
+        run: |
+          IMAGE="${{ steps.meta.outputs.image }}"
+          TAG="${{ steps.meta.outputs.tag }}"
+
+          # `latest` only tracks main; other branches publish the SHA tag only.
+          EXTRA_TAG=""
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            EXTRA_TAG="-t ${IMAGE}:latest"
+          fi
+
+          docker buildx build \
+            --cache-from type=registry,ref=${IMAGE}:buildcache \
+            --cache-to   type=registry,ref=${IMAGE}:buildcache,mode=max \
+            --build-arg IMAGE_TAG="${TAG}" \
+            --build-arg NODE_IMAGE=registry.telecorpthailand.com/dockerhub/library/node:24-bookworm-slim \
+            -t "${IMAGE}:${TAG}" \
+            ${EXTRA_TAG} \
+            -f ${{ matrix.dockerfile }} \
+            --push \
+            .
+
+      - name: Summary
+        run: |
+          echo "## 🐳 ${{ matrix.service }} image pushed" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY

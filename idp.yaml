@@ -1,0 +1,112 @@
+# ─── MiniIDP Configuration ───
+# ไฟล์นี้ใช้กำหนดค่าการ deploy สำหรับแต่ละ service
+# MiniIDP จะอ่านไฟล์นี้จาก repo และสร้าง Helm values + ArgoCD manifests ให้อัตโนมัติ
+# ค่าที่ไม่ได้กำหนด (resources, probes ฯลฯ) จะใช้ chart defaults จาก base-microservice
+#
+# T3 Code ships as ONE container: the `t3` server (apps/server) bundles the web
+# client and serves it from the same origin. docker/Dockerfile.server builds it;
+# .gitea/workflows/ci.yml pushes it as the `web` service.
+#
+# The server is stateful (SQLite state, pairings, provider subprocesses), so
+# keep `replicas: 1` in every environment. A second replica behind the same
+# ingress would split WebSocket sessions between two databases.
+
+# ─── Environments ───
+# กำหนด branch → environment mapping
+# branch ที่ไม่ได้ map ไว้จะถูก skip (ไม่ deploy)
+# namespace/domain จะถูก enrich อัตโนมัติตอน bootstrap ถ้าไม่ได้กำหนด
+# services: กำหนด config ของแต่ละ service เฉพาะ environment นั้นๆ
+environments:
+  dev:
+    branch: develop
+    enabled: true
+    # namespace: project-dev            ← auto-generated ถ้าไม่ใส่
+    # domain: project-dev.thaisee.com   ← auto-generated ถ้าไม่ใส่
+    services:
+      web:
+        workload:
+          containerPort: 3773
+          replicas: 1
+          env:
+            - name: T3CODE_HOST
+              value: 0.0.0.0
+            - name: T3CODE_PORT
+              value: "3773"
+            # Runtime state (SQLite, pairings, settings). The chart mounts no
+            # volume, so this is lost on every restart; pair again from the
+            # pod log after a rollout.
+            - name: T3CODE_HOME
+              value: /data
+        service:
+          port: 3773
+        ingress:
+          enabled: true
+          className: nginx
+          # The client talks to the server over a long-lived WebSocket;
+          # nginx's 60s default would drop idle sessions.
+          annotations:
+            nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+            nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+          hosts:
+            - paths:
+                - path: /
+                  pathType: Prefix
+        # `/` serves the bundled web client without auth; the API and
+        # WebSocket paths need a paired session, so they cannot be probed.
+        livenessProbe:
+          enabled: true
+          httpGet:
+            path: /
+            port: http
+        readinessProbe:
+          enabled: true
+          httpGet:
+            path: /
+            port: http
+
+  production:
+    branch: main
+    enabled: false # เปิดเมื่อพร้อม deploy production
+    services:
+      web:
+        workload:
+          containerPort: 3773
+          replicas: 1
+          # Agent subprocesses (Claude, Codex, ...) run inside this container,
+          # so it needs more than a plain web service.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          env:
+            - name: T3CODE_HOST
+              value: 0.0.0.0
+            - name: T3CODE_PORT
+              value: "3773"
+            - name: T3CODE_HOME
+              value: /data
+        service:
+          port: 3773
+        ingress:
+          enabled: true
+          className: nginx
+          annotations:
+            nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+            nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+          hosts:
+            - paths:
+                - path: /
+                  pathType: Prefix
+        livenessProbe:
+          enabled: true
+          httpGet:
+            path: /
+            port: http
+        readinessProbe:
+          enabled: true
+          httpGet:
+            path: /
+            port: http

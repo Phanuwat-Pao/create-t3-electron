@@ -1,0 +1,147 @@
+name: "🚀 Deploy / Rollback"
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service ที่จะ deploy"
+        required: true
+        type: choice
+        options:
+          - web
+      environment:
+        description: "Environment ปลายทาง (ตรงกับชื่อใน idp.yaml: dev, production, ...)"
+        required: true
+        type: string
+        default: dev
+      tag:
+        description: "Image tag (เช่น main-sha-abc1234) — ดูได้จาก registry หรือ ใน workflows ของ version ที่ต้องการ deploy"
+        required: true
+        type: string
+
+# ──────────────────────────────────────────────
+# วิธีใช้:
+#   1. ไปหน้า Actions → เลือก "🚀 Deploy / Rollback"
+#   2. กด "Run workflow"
+#   3. เลือก service (web)
+#   4. เลือก environment (dev, production, ... ตาม idp.yaml)
+#   5. ใส่ tag ที่ต้องการ deploy (เช่น main-sha-abc1234)
+#
+# Rollback:
+#   ใส่ tag เก่าที่ต้องการย้อนกลับไป → MiniIDP จะ deploy tag นั้นแทน
+#
+# ต้องมี secrets:
+#   IDP_URL    — URL ของ MiniIDP
+#   IDP_TOKEN  — Token สำหรับ auth
+# ──────────────────────────────────────────────
+
+jobs:
+  deploy:
+    name: "Deploy ${{ inputs.service }}:${{ inputs.tag }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate inputs
+        run: |
+          echo "📋 Deploy Request:"
+          echo "   Service: ${{ inputs.service }}"
+          echo "   Env:     ${{ inputs.environment }}"
+          echo "   Tag:     ${{ inputs.tag }}"
+          echo "   By:      ${{ github.actor }}"
+          echo "   Time:    $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+          if [ -z "${{ inputs.tag }}" ]; then
+            echo "::error::Tag is required"
+            exit 1
+          fi
+
+      - name: Validate secrets
+        env:
+          IDP_URL: ${{ secrets.IDP_URL }}
+          IDP_TOKEN: ${{ secrets.IDP_TOKEN }}
+        run: |
+          MISSING=""
+          [ -z "${IDP_URL}" ]   && MISSING="${MISSING} IDP_URL"
+          [ -z "${IDP_TOKEN}" ] && MISSING="${MISSING} IDP_TOKEN"
+
+          if [ -n "${MISSING}" ]; then
+            echo "::error::Missing secrets:${MISSING}"
+            exit 1
+          fi
+          echo "✅ All secrets present"
+
+      - name: Verify image exists
+        env:
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          IMAGE="${REGISTRY_URL}/${{ github.event.repository.name }}/${{ inputs.service }}"
+          FULL="${IMAGE}:${{ inputs.tag }}"
+          echo "🔍 Checking image: ${FULL}"
+
+          echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY_URL}" \
+            -u "${REGISTRY_USERNAME}" --password-stdin 2>/dev/null
+
+          if docker manifest inspect "${FULL}" > /dev/null 2>&1; then
+            echo "✅ Image exists"
+          else
+            echo "::warning::Cannot verify image (manifest inspect not supported or image not found)"
+            echo "⚠️ Proceeding anyway — MiniIDP will validate"
+          fi
+
+      - name: Notify MiniIDP
+        env:
+          IDP_URL: ${{ secrets.IDP_URL }}
+          IDP_TOKEN: ${{ secrets.IDP_TOKEN }}
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+        run: |
+          IMAGE="${REGISTRY_URL}/${{ github.event.repository.name }}/${{ inputs.service }}"
+          ENDPOINT="${IDP_URL}/api/v1/image-update"
+          PAYLOAD=$(cat <<EOF
+          {
+            "repo": "${{ github.event.repository.name }}",
+            "service": "${{ inputs.service }}",
+            "environment": "${{ inputs.environment }}",
+            "tag": "${{ inputs.tag }}",
+            "image": "${IMAGE}"
+          }
+          EOF
+          )
+
+          echo "📡 Notifying MiniIDP"
+          echo "   URL:     ${ENDPOINT}"
+          echo "   Payload: ${PAYLOAD}"
+          echo ""
+
+          HTTP_CODE=$(curl -s -o /tmp/idp_response.txt -w "%{http_code}" \
+            -X POST "${ENDPOINT}" \
+            -H "X-IDP-Token: ${IDP_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "${PAYLOAD}" \
+            --connect-timeout 10 \
+            --max-time 30)
+
+          RESPONSE=$(cat /tmp/idp_response.txt 2>/dev/null || echo "(empty)")
+
+          echo "   Status:   ${HTTP_CODE}"
+          echo "   Response: ${RESPONSE}"
+
+          if [ "${HTTP_CODE}" -ge 200 ] && [ "${HTTP_CODE}" -lt 300 ]; then
+            echo "✅ MiniIDP notified successfully"
+          else
+            echo "::error::MiniIDP notify failed (HTTP ${HTTP_CODE}): ${RESPONSE}"
+            exit 1
+          fi
+
+      - name: Summary
+        run: |
+          IMAGE="${{ secrets.REGISTRY_URL }}/${{ github.event.repository.name }}/${{ inputs.service }}"
+          echo "## 🚀 Deploy triggered" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | \`${{ inputs.service }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`${{ inputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${IMAGE}:${{ inputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered by | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
