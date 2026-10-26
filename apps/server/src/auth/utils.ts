@@ -4,6 +4,7 @@ import type {
   AuthClientPresentationMetadata,
 } from "@t3tools/contracts";
 import type * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createHmac or timingSafeEqual.
 import * as NodeCrypto from "node:crypto";
 import * as Encoding from "effect/Encoding";
 import * as Result from "effect/Result";

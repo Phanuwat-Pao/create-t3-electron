@@ -685,7 +685,7 @@ function makeManager(input?: {
           discover: Effect.succeed([]),
         }),
       ),
-      Effect.provide(Layer.succeed(GitHubCli.GitHubCli, gitHubCli)),
+      Effect.provideService(GitHubCli.GitHubCli, gitHubCli),
     ),
   );
 

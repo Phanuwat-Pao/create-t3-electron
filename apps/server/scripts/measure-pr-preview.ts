@@ -50,6 +50,7 @@ const measuredProcess = Layer.effect(
 const services = GitHubPullRequestCli.layer.pipe(
   Layer.provide(GitHubCli.layer),
   Layer.provideMerge(measuredProcess),
+  Layer.provide(NodeServices.layer),
 );
 
 const decodeJson = Schema.decodeSync(Schema.fromJsonString(Schema.Unknown));

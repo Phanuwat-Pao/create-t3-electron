@@ -2,8 +2,9 @@ import { runGitHubStackAction, type GitHubStackActionError } from "./githubStack
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
-import * as NodeCrypto from "node:crypto";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Encoding from "effect/Encoding";
 import * as Layer from "effect/Layer";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
@@ -1090,6 +1091,7 @@ function actionArgs(
 export const make = Effect.gen(function* () {
   const github = yield* GitHubCli.GitHubCli;
   const graphQlBudget = yield* GitHubGraphQlBudget.GitHubGraphQlBudget;
+  const crypto = yield* Crypto.Crypto;
   const routingIdentities = new Map<
     string,
     {
@@ -1125,7 +1127,10 @@ export const make = Effect.gen(function* () {
               })
               .pipe(Effect.mapError(unavailable))).stdout.trim();
       if (!token) return yield* unavailable();
-      const key = `${host}:${NodeCrypto.createHash("sha256").update(token).digest("hex")}`;
+      const tokenHash = yield* crypto
+        .digest("SHA-256", new TextEncoder().encode(token))
+        .pipe(Effect.map(Encoding.encodeHex), Effect.orDie);
+      const key = `${host}:${tokenHash}`;
       const credential = { host, token: Redacted.make(token), credentialFingerprint: key };
       // A cold page may ask several times. Wait per credential and check again after the
       // first verification; cancellation releases the next waiter without losing its request.

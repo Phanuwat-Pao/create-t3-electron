@@ -5,10 +5,10 @@ import {
   resolveProjectScripts,
   setupProjectScript,
 } from "@t3tools/shared/projectScripts";
-import * as NodeCrypto from "node:crypto";
 
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -196,6 +196,7 @@ export const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const terminalManager = yield* TerminalManager.TerminalManager;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const crypto = yield* Crypto.Crypto;
   const completionShell = resolveCompletionShell(
     yield* HostProcessPlatform,
     yield* HostProcessEnvironment,
@@ -352,7 +353,9 @@ export const make = Effect.gen(function* () {
       worktreePath: input.worktreePath,
     });
     const observe = input.observeCompletion;
-    const completionToken = observe ? NodeCrypto.randomUUID().replaceAll("-", "") : null;
+    const completionToken = observe
+      ? (yield* crypto.randomUUIDv4.pipe(Effect.orDie)).replaceAll("-", "")
+      : null;
     const commandLine =
       observe && completionToken
         ? wrapCommandForCompletion(

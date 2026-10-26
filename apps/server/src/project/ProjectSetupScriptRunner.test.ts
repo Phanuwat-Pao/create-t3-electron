@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it, vi } from "@effect/vitest";
 import { type OrchestrationProject, ProjectId, type TerminalEvent } from "@t3tools/contracts";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -83,6 +84,7 @@ const testLayer = (
     Layer.provideMerge(makeProjectionSnapshotQueryLayer(project)),
     Layer.provideMerge(makeTerminalManagerLayer(terminal)),
     Layer.provide(settings),
+    Layer.provide(NodeCrypto.layer),
   );
 
 describe("ProjectSetupScriptRunner", () => {

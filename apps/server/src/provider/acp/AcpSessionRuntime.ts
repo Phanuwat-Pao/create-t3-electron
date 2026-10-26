@@ -696,7 +696,7 @@ export const make = (
       value: string | boolean,
     ): Effect.Effect<EffectAcpSchema.SetSessionConfigOptionResponse, EffectAcpErrors.AcpError> =>
       validateConfigOptionValue(configId, value).pipe(
-        Effect.flatMap(() => getStartedState),
+        Effect.andThen(getStartedState),
         Effect.flatMap((started) =>
           Ref.get(configOptionsRef).pipe(
             Effect.flatMap((configOptions) => {

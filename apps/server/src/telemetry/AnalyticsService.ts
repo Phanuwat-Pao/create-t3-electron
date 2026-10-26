@@ -171,11 +171,7 @@ export const make = Effect.gen(function* () {
       }
 
       yield* sendBatch(batch).pipe(
-        Effect.catch((error) =>
-          Ref.update(bufferRef, (current) => [...batch, ...current]).pipe(
-            Effect.flatMap(() => Effect.fail(error)),
-          ),
-        ),
+        Effect.tapError(() => Ref.update(bufferRef, (current) => [...batch, ...current])),
       );
     }
   }).pipe(Effect.catch((cause) => Effect.logError("Failed to flush telemetry", { cause })));
@@ -194,7 +190,7 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  yield* Effect.forever(Effect.sleep(1000).pipe(Effect.flatMap(() => flush)), {
+  yield* Effect.forever(Effect.sleep(1000).pipe(Effect.andThen(flush)), {
     disableYield: true,
   }).pipe(Effect.forkScoped);
 

@@ -243,12 +243,7 @@ describe("ssh tunnel scripts", () => {
   });
 
   it("uses the remote t3 runner for launch and pairing scripts", () => {
-    const target = {
-      alias: "devbox",
-      hostname: "devbox.example.com",
-      username: "julius",
-      port: 2222,
-    } as const;
+    const stateKey = "711bc738002d72fd";
     const launch = buildRemoteLaunchScript(ARCHIVE);
     const devLaunch = buildRemoteLaunchScript({
       ...NODE_SCRIPT,
@@ -275,24 +270,27 @@ describe("ssh tunnel scripts", () => {
     assert.include(launch, "It wrote nothing to %s");
     assert.include(launch, "T3_ARCHIVE_VERSION='1.2.3-preview.20260911.4'");
     assert.include(
-      buildRemotePairingScript(target, ARCHIVE),
+      buildRemotePairingScript(stateKey, ARCHIVE),
       '"$RUNNER_FILE" auth pairing create --base-dir "$PAIRING_BASE_DIR" --json',
     );
     assert.include(
-      buildRemotePairingScript(target, ARCHIVE),
+      buildRemotePairingScript(stateKey, ARCHIVE),
       'PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"',
     );
-    assert.notInclude(buildRemotePairingScript(target, ARCHIVE), "server-home");
+    assert.notInclude(buildRemotePairingScript(stateKey, ARCHIVE), "server-home");
     assert.include(
-      buildRemotePairingScript(target, ARCHIVE),
+      buildRemotePairingScript(stateKey, ARCHIVE),
       "T3_ARCHIVE_VERSION='1.2.3-preview.20260911.4'",
     );
     assert.include(
-      buildRemoteStopScript(target),
+      buildRemoteStopScript(stateKey),
       'if [ "$REMOTE_MANAGED" != "external" ] && [ -n "$REMOTE_PID" ]',
     );
-    assert.include(buildRemoteStopScript(target), 'kill "$REMOTE_PID" 2>/dev/null || true');
-    assert.include(buildRemoteStopScript(target), 'rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE"');
+    assert.include(buildRemoteStopScript(stateKey), 'kill "$REMOTE_PID" 2>/dev/null || true');
+    assert.include(
+      buildRemoteStopScript(stateKey),
+      'rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE"',
+    );
     assert.include(
       launch,
       'DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"',

@@ -10,6 +10,7 @@ import {
 } from "@t3tools/contracts";
 import { codexCallbackUrl } from "@t3tools/shared/codexAuthHandoff";
 import * as Clock from "effect/Clock";
+import * as Crypto from "effect/Crypto";
 import * as Cause from "effect/Cause";
 import { AnalyticsService } from "../telemetry/AnalyticsService.ts";
 import * as Exit from "effect/Exit";
@@ -158,6 +159,7 @@ export const makeCodexChatGptAuth = Effect.fn("makeCodexChatGptAuth")(function* 
     options.instanceId,
   );
   const secrets = yield* ServerSecretStore;
+  const crypto = yield* Crypto.Crypto;
   const environmentLocks = sessionLocks.get(secrets) ?? new Map<string, Semaphore.Semaphore>();
   sessionLocks.set(secrets, environmentLocks);
   const lock = environmentLocks.get(store.binding.key) ?? (yield* Semaphore.make(1));
@@ -306,7 +308,10 @@ export const makeCodexChatGptAuth = Effect.fn("makeCodexChatGptAuth")(function* 
       savedConnectionCount: savedConnections.size,
       unidentifiedConnectedConnectionCount,
     };
-  }).pipe(Effect.provideService(ServerSecretStore, secrets));
+  }).pipe(
+    Effect.provideService(ServerSecretStore, secrets),
+    Effect.provideService(Crypto.Crypto, crypto),
+  );
   const saveRegistration = Effect.fnUntraced(function* (profile: typeof Registration.Type) {
     const saved = yield* readRegistrations;
     profile = {

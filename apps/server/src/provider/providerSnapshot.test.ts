@@ -3,7 +3,6 @@ import type { ModelCapabilities } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -156,7 +155,7 @@ describe("ProviderCommandNotFoundError", () => {
         "C:\\tools\\codex.cmd",
         ChildProcess.make("codex", ["--version"]),
       ).pipe(
-        Effect.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(HostProcessPlatform, "win32"),
         Effect.flip,
       );

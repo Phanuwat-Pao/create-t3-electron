@@ -7,14 +7,15 @@ import {
   HostProcessPlatform,
 } from "@t3tools/shared/hostProcess";
 import * as Deferred from "effect/Deferred";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Encoding from "effect/Encoding";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
-import * as NodeCrypto from "node:crypto";
 import {
   makeCodexInstallation,
   type CodexInstallation,
@@ -30,7 +31,6 @@ const asset = {
   version: "0.156.1",
   target: "aarch64-apple-darwin",
   url: "https://github.com/openai/codex/releases/download/test/package.tar.gz",
-  sha256: NodeCrypto.createHash("sha256").update(archive).digest("hex"),
   archiveBytes: archive.length,
 };
 const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
@@ -57,9 +57,11 @@ const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
     );
   }
   let downloads = 0;
+  const crypto = yield* Crypto.Crypto;
+  const sha256 = Encoding.encodeHex(yield* crypto.digest("SHA-256", archive).pipe(Effect.orDie));
   const installation = yield* makeCodexInstallation({
     baseDir,
-    releaseAsset: asset,
+    releaseAsset: { ...asset, sha256 },
     validate: () => Effect.void,
     ...input.options,
   }).pipe(

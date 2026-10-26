@@ -1,8 +1,9 @@
-import * as NodeCrypto from "node:crypto";
 import type { ToolActivityNativeAppReference } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Encoding from "effect/Encoding";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -175,9 +176,13 @@ const resolveNativeAppIconUncached = Effect.fn("NativeAppIconResolver.resolveUnc
   const appVersion =
     (yield* plistValue(infoPlistPath, "CFBundleVersion")) ||
     (yield* plistValue(infoPlistPath, "CFBundleShortVersionString"));
-  const cacheKey = NodeCrypto.createHash("sha256")
-    .update(`${canonicalAppPath}\0${appVersion}\0${sourceIconPath}`)
-    .digest("hex");
+  const crypto = yield* Crypto.Crypto;
+  const cacheKey = yield* crypto
+    .digest(
+      "SHA-256",
+      new TextEncoder().encode(`${canonicalAppPath}\0${appVersion}\0${sourceIconPath}`),
+    )
+    .pipe(Effect.map(Encoding.encodeHex), Effect.orDie);
   const cacheDirectory = path.join(config.providerStatusCacheDir, "native-app-icons");
   const cachePath = path.join(cacheDirectory, `${cacheKey}.png`);
   if (yield* existingFile(cachePath)) return cachePath;
@@ -185,7 +190,7 @@ const resolveNativeAppIconUncached = Effect.fn("NativeAppIconResolver.resolveUnc
   yield* fileSystem.makeDirectory(cacheDirectory, { recursive: true });
   const temporaryPath = path.join(
     cacheDirectory,
-    `.${cacheKey}-${process.pid}-${(yield* Clock.currentTimeMillis).toString(36)}-${NodeCrypto.randomUUID()}.png`,
+    `.${cacheKey}-${process.pid}-${(yield* Clock.currentTimeMillis).toString(36)}-${yield* crypto.randomUUIDv4.pipe(Effect.orDie)}.png`,
   );
   yield* commandOutput("/usr/bin/sips", [
     "-z",

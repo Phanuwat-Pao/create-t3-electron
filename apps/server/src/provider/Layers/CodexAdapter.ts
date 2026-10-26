@@ -33,6 +33,7 @@ import {
   ProviderSendTurnInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- nativeAppSourceKey runs in the synchronous mapToRuntimeEvents mapper, and Effect's Crypto only hashes inside an Effect.
 import * as NodeCrypto from "node:crypto";
 import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
