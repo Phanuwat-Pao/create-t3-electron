@@ -323,6 +323,7 @@
     "@effect/vitest": "catalog:",
     "@types/three": "0.180.0",
     "micromark-util-types": "^2.0.2",
+    "typescript": "catalog:",
     "vite-plus": "catalog:"
   }
 }

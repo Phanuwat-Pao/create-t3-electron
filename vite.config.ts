@@ -352,7 +352,7 @@ export default defineConfig({
     ],
     options: {
       reportUnusedDisableDirectives: "error",
-      // Revisit once Oxlint's tsgolint path can integrate with @effect/tsgo diagnostics.
+      // Revisit once Oxlint's tsgolint path can run the Effect diagnostics that tsc-rs runs.
       typeAware: false,
       typeCheck: false,
     },

@@ -23,12 +23,15 @@
         "name": "@effect/language-service",
         "namespaceImportPackages": ["@effect/platform-node", "effect"],
         "diagnosticSeverity": {
-          "importFromBarrel": "error",
           "anyUnknownInErrorContext": "error",
           "unsafeEffectTypeAssertion": "error",
           "instanceOfSchema": "error",
           "deterministicKeys": "error",
           "strictEffectProvide": "off",
+          // We use Effect's unstable modules (http, sql, process, reactivity) on purpose. These rules
+          // also make tsc-rs report false TS2790 errors on `delete`, as in t3code.
+          "unstableApiUsage": "off",
+          "experimentalApiUsage": "off",
           "missingEffectServiceDependency": "error",
           "leakingRequirements": "error",
           "globalErrorInEffectCatch": "error",

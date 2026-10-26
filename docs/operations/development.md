@@ -106,6 +106,11 @@ vp lint <files>
 vp run --filter <package> typecheck
 ```
 
+TypeScript workspaces typecheck with `tsc`. The `typescript` catalog entry is
+`@tsc-rs/typescript`, the tsc-rs drop-in, with the Effect diagnostics from
+`tsconfig.base.json` built in. VS Code uses it through `js/ts.tsdk.path` in
+`.vscode/settings.json`. Marketing keeps `astro check` for Astro files.
+
 Use `vp run lint:mobile` for native mobile changes. CI owns the full suite; see
 [ci.yml](../../.github/workflows/ci.yml) for its current jobs.
 The [manual Windows lane](../../.github/workflows/windows-tests.yml) is available for focused

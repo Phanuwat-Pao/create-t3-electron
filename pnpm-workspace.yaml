@@ -9,6 +9,7 @@ packages:
 # true = allowed to run build scripts; false mirrors the pnpm 10 behavior
 # where anything outside onlyBuiltDependencies was silently not built.
 allowBuilds:
+  "@tsc-rs/typescript": true
   browser-tabs-lock: false
   bufferutil: false
   core-js: false
@@ -34,7 +35,6 @@ catalog:
   "@effect/platform-node": 4.0.0-rc.115
   "@effect/platform-node-shared": 4.0.0-rc.115
   "@effect/sql-pg": 4.0.0-rc.115
-  "@effect/tsgo": 0.41.0
   "@effect/vitest": 4.0.0-rc.115
   "@legendapp/list": 3.3.5
   "@noble/curves": 1.9.1
@@ -48,12 +48,13 @@ catalog:
   jose: 6.2.2
   lightningcss: 1.33.0
   tailwindcss: 4.3.3
-  typescript: 7.0.2
+  typescript: npm:@tsc-rs/typescript@0.8.0
   vite: npm:@voidzero-dev/vite-plus-core@1.0.0
   vite-plus: 1.0.0
   yaml: ^2.9.0
 
 minimumReleaseAgeExclude:
+  - "@tsc-rs/*"
   - "@clerk/backend@3.18.1"
   - "@clerk/clerk-js@6.32.1"
   - "@clerk/electron@0.0.44"
@@ -210,6 +211,7 @@ patchedDependencies:
 
 peerDependencyRules:
   allowAny:
+    - typescript
     - vite
   allowedVersions:
     vite: "*"
