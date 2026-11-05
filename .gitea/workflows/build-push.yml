@@ -106,7 +106,7 @@ jobs:
             --cache-from type=registry,ref=${IMAGE}:buildcache \
             --cache-to   type=registry,ref=${IMAGE}:buildcache,mode=max \
             --build-arg IMAGE_TAG="${TAG}" \
-            --build-arg NODE_IMAGE=registry.telecorpthailand.com/dockerhub/library/node:24-bookworm-slim \
+            --build-arg NODE_IMAGE=registry.telecorpthailand.com/dockerhub/library/node:26-bookworm-slim \
             -t "${IMAGE}:${TAG}" \
             ${EXTRA_TAG} \
             -f ${{ matrix.dockerfile }} \

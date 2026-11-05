@@ -205,8 +205,9 @@ jobs:
           ${SUDO} apt-get install -y -qq python3 make g++
 
       - name: Install pnpm
-        # Version comes from the "packageManager" field in package.json
-        run: corepack enable
+        # Version comes from the "packageManager" field in package.json.
+        # Node 25+ no longer ships corepack, so install it first.
+        run: npm i -g corepack@latest && corepack enable
 
       - name: Configure pnpm store
         run: pnpm config set store-dir "${RUNNER_TEMP}/pnpm-store"
@@ -374,7 +375,7 @@ jobs:
             --cache-from type=registry,ref=${IMAGE}:buildcache \
             --cache-to   type=registry,ref=${IMAGE}:buildcache,mode=max \
             --build-arg IMAGE_TAG="${TAG}" \
-            --build-arg NODE_IMAGE=registry.telecorpthailand.com/dockerhub/library/node:24-bookworm-slim \
+            --build-arg NODE_IMAGE=registry.telecorpthailand.com/dockerhub/library/node:26-bookworm-slim \
             -t "${IMAGE}:${TAG}" \
             -t "${IMAGE}:latest" \
             -f ${{ matrix.dockerfile }} \

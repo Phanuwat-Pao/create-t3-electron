@@ -416,9 +416,11 @@ export function upgradeLegacyContextMessage(text: string): UpgradedLegacyContext
     if (placedTerminals.has(record)) continue;
     const label = inlineTerminalLabel(record);
     let at = body.indexOf(label);
+    // `(?![\s\S])` is end of input. A bracket class right before `$` under `u`
+    // never matches an astral character (𐐀) on V8 14.6, the engine in Node 26.
     while (
       at !== -1 &&
-      (/[\p{L}\p{N}\p{M}_@.-]$/u.test(body.slice(0, at)) ||
+      (/[\p{L}\p{N}\p{M}_@.-](?![\s\S])/u.test(body.slice(0, at)) ||
         /^(?:[\p{L}\p{N}\p{M}_-]|[.@]+[\p{L}\p{N}\p{M}_-])/u.test(body.slice(at + label.length)))
     ) {
       at = body.indexOf(label, at + 1);

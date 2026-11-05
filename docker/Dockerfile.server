@@ -7,7 +7,7 @@
 # (avoids Docker Hub's anonymous pull rate limit); defaults to Docker Hub for
 # local builds. Debian rather than Alpine: node-pty, @napi-rs/keyring and
 # @ff-labs/fff-node ship glibc builds; musl is not covered by every one of them.
-ARG NODE_IMAGE=node:24-bookworm-slim
+ARG NODE_IMAGE=node:26-bookworm-slim
 ARG IMAGE_TAG=dev
 
 # ── Base: pnpm from package.json#packageManager ─────────────────────────
